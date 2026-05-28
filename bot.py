@@ -25,14 +25,14 @@ async def obter_cotacao_dolar(session):
     return 5.30
 
 async def buscar_promocoes_premium(session, cotacao):
-    url = "https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal Rating&onSale=1"
+    # Aumentamos o pageSize para 100 para ter mais opções na "peneira"
+    url_cheapshark = "https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal Rating&onSale=1&pageSize=100"
+    
     try:
-        async with session.get(url, timeout=10) as resposta:
-            if resposta.status != 200:
-                return []
+        async with session.get(url_cheapshark, timeout=10) as resposta:
+            if resposta.status != 200: return []
             dados = await resposta.json()
-    except Exception as e:
-        print(f"Erro na API de jogos: {e}")
+    except:
         return []
 
     jogos_filtrados = []
@@ -40,38 +40,55 @@ async def buscar_promocoes_premium(session, cotacao):
     
     for jogo in dados:
         try:
-            preco_usd = float(jogo['normalPrice'])
-            desconto = float(jogo['savings'])
-            metacritic = int(jogo['metacriticScore']) if jogo['metacriticScore'] != "0" else 0
-            avaliacoes_steam = int(jogo.get('steamRatingCount', 0))
             app_id = jogo['steamAppID']
+            if app_id in jogos_adicionados: continue
             
-            if preco_usd >= 29.90 and desconto >= 50.0:
-                if avaliacoes_steam > 20000 or metacritic >= 85:
-                    if app_id in jogos_adicionados:
-                        continue
+            preco_usd_normal = float(jogo['normalPrice'])
+            desconto = float(jogo['savings'])
+            avaliacoes = int(jogo.get('steamRatingCount', 0))
+            
+            # FILTROS EQUILIBRADOS:
+            # - Preço original >= $14.99 (Pega jogos médios e grandes)
+            # - Avaliações >= 5.000 (Garante que o jogo é conhecido)
+            # - Desconto >= 50% (Foco em promoção real)
+            if preco_usd_normal >= 14.99 and avaliacoes >= 5000 and desconto >= 50.0:
+                
+                # Consulta de Preço Regional na Steam (Precisão 100%)
+                url_steam = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=br&filters=price_overview"
+                
+                async with session.get(url_steam) as resp_steam:
+                    if resp_steam.status != 200: continue
+                    dados_steam = await resp_steam.json()
+                    
+                    if dados_steam and dados_steam.get(app_id) and dados_steam[app_id]['success']:
+                        info_preco = dados_steam[app_id]['data'].get('price_overview')
                         
-                    preco_atual_brl = float(jogo['salePrice']) * cotacao
-                    preco_original_brl = preco_usd * cotacao
+                        if info_preco:
+                            preco_atual_brl = info_preco['final_formatted']
+                            preco_original_brl = info_preco['initial_formatted']
+                        else:
+                            continue
+                    else:
+                        continue
 
-                    jogos_filtrados.append({
-                        'titulo': jogo['title'],
-                        'preco_atual': f"R$ {preco_atual_brl:.2f}".replace('.', ','),
-                        'preco_original': f"R$ {preco_original_brl:.2f}".replace('.', ','),
-                        'desconto_raw': desconto,
-                        'desconto_fmt': f"{desconto:.0f}%",
-                        'popularidade': avaliacoes_steam,
-                        'link': f"https://store.steampowered.com/app/{app_id}"
-                    })
-                    
-                    jogos_adicionados.add(app_id)
-                    
-                    # Agora paramos no TOP 10 em vez de 5
-                    if len(jogos_filtrados) == 10:
-                        break
-        except (ValueError, KeyError, TypeError):
+                jogos_filtrados.append({
+                    'titulo': jogo['title'],
+                    'preco_atual': preco_atual_brl,
+                    'preco_original': preco_original_brl,
+                    'desconto_raw': desconto,
+                    'desconto_fmt': f"{desconto:.0f}%",
+                    'popularidade': avaliacoes,
+                    'link': f"https://store.steampowered.com/app/{app_id}"
+                })
+                
+                jogos_adicionados.add(app_id)
+                
+                # Agora o limite de 10 será atingido mais facilmente
+                if len(jogos_filtrados) == 10:
+                    break
+        except:
             continue
-            
+
     return jogos_filtrados
 
 # --- EVENTOS DO BOT ---

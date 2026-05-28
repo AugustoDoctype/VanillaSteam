@@ -144,6 +144,72 @@ async def ofertas(ctx):
     
     await ctx.send(embed=embed)
 
+# -- BUSCAR JOGO ---
+@bot.command(name="buscar")
+async def buscar(ctx, *, nome_jogo: str):
+    """Busca o preço de um jogo específico na Steam."""
+    msg_espera = await ctx.send(f"🔎 Procurando por **{nome_jogo}**...")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 1. Busca no CheapShark para pegar o Steam ID
+            url_busca = f"https://www.cheapshark.com/api/1.0/games?title={nome_jogo.replace(' ', '%20')}&limit=1"
+            async with session.get(url_busca) as resp:
+                dados_busca = await resp.json()
+
+            if not dados_busca:
+                await msg_espera.edit(content=f"❌ Não encontrei nenhum jogo com o nome '{nome_jogo}'.")
+                return
+
+            steam_app_id = dados_busca[0].get('steamAppID')
+            titulo_oficial = dados_busca[0].get('external')
+
+            # Se o jogo não tiver um ID da Steam (ex: jogo exclusivo da Epic ou GOG)
+            if not steam_app_id or steam_app_id == "0":
+                await msg_espera.edit(content=f"ℹ️ Encontrei **{titulo_oficial}**, mas ele não parece estar disponível na Steam.")
+                return
+
+            # 2. Busca o preço oficial na Steam (cc=br para vir em Reais)
+            url_steam = f"https://store.steampowered.com/api/appdetails?appids={steam_app_id}&cc=br&filters=price_overview"
+            
+            async with session.get(url_steam) as resp_steam:
+                dados_steam = await resp_steam.json()
+                
+                if not dados_steam or not dados_steam.get(steam_app_id) or not dados_steam[steam_app_id]['success']:
+                    await msg_espera.edit(content=f"❌ Não consegui obter os preços de **{titulo_oficial}** na Steam Brasil.")
+                    return
+
+                # Extrai dados de preço
+                data = dados_steam[steam_app_id].get('data', {})
+                info_preco = data.get('price_overview')
+
+                embed = discord.Embed(title=titulo_oficial, color=0x1b2838)
+                
+                # URL Oficial da Steam para imagens (mais confiável)
+                img_url = f"https://cdn.akamai.steamstatic.com/steam/apps/{steam_app_id}/header.jpg"
+                embed.set_image(url=img_url)
+
+                if info_preco:
+                    preco_atual = info_preco['final_formatted']
+                    preco_original = info_preco['initial_formatted']
+                    desconto = info_preco.get('discount_percent', 0)
+
+                    if desconto > 0:
+                        embed.description = f"🔥 **Promoção ativa!**\n💰 De: ~~{preco_original}~~ por **{preco_atual}**\n📉 Desconto de **{desconto}%**"
+                    else:
+                        embed.description = f"💰 Preço atual: **{preco_atual}**\n\n*Este jogo não está em oferta no momento.*"
+                else:
+                    embed.description = "ℹ️ Este jogo parece ser gratuito ou não possui preço definido na loja."
+
+                embed.add_field(name="Link na Loja", value=f"[Página do Jogo na Steam](https://store.steampowered.com/app/{steam_app_id})", inline=False)
+                
+                await msg_espera.delete()
+                await ctx.send(embed=embed)
+
+    except Exception as e:
+        print(f"ERRO NO COMANDO BUSCAR: {e}") # Isso vai aparecer no seu terminal do VS Code
+        await msg_espera.edit(content="⚠️ Ocorreu um erro interno ao processar a busca. Verifique o console.")
+
 # --- TRATAMENTO DE ERRO (AVISO DE COOLDOWN) ---
 @ofertas.error
 async def ofertas_error(ctx, error):

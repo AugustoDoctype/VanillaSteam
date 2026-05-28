@@ -1,0 +1,11 @@
+# Segredos e Configurações
+.env
+
+# Ambiente Virtual (Dependências)
+venv/
+env/
+ENV/
+
+# Arquivos temporários do Python
+__pycache__/
+*.pyc

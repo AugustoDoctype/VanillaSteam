@@ -1,9 +1,14 @@
 import discord
 import os
 import aiohttp
+import asyncio
 from discord.ext import commands
 from dotenv import load_dotenv
 from datetime import datetime
+from discord.ext import commands, tasks # tasks
+from datetime import time, datetime
+
+
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -25,7 +30,7 @@ async def obter_cotacao_dolar(session):
     return 5.30
 
 async def buscar_promocoes_premium(session, cotacao):
-    # Aumentamos o pageSize para 100 para ter mais opções na "peneira"
+    # Aumentar o pageSize para 100 para ter mais opções na "peneira"
     url_cheapshark = "https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal Rating&onSale=1&pageSize=100"
     
     try:
@@ -94,7 +99,12 @@ async def buscar_promocoes_premium(session, cotacao):
 # --- EVENTOS DO BOT ---
 @bot.event
 async def on_ready():
-    print(f'✅ Sistema operando em alta performance como {bot.user.name}')
+    print(f'✅ Sistema operando como {bot.user.name}')
+    
+    # Inicia a automação se ela não estiver rodando
+    if not jornal_da_manha.is_running():
+        jornal_da_manha.start()
+        print("🕒 Automação diária agendada com sucesso.")
 
 # --- COMANDO PRINCIPAL COM COOLDOWN ---
 @bot.command(name="ofertas")
@@ -215,5 +225,40 @@ async def buscar(ctx, *, nome_jogo: str):
 async def ofertas_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"⏳ Calma aí! O sistema está processando dados. Tente novamente em **{error.retry_after:.0f} segundos**.")
+
+# --- CONFIGURAÇÃO DA AUTOMAÇÃO ---
+HORARIO_POSTAGEM = time(hour=10, minute=0) # Definido para as 10:00 da manhã
+ID_CANAL_OFERTAS = 1507542658359230496 # ID DO CANAL
+
+@tasks.loop(seconds=10)
+async def jornal_da_manha():
+    canal = bot.get_channel(ID_CANAL_OFERTAS)
+    if not canal:
+        print("❌ Erro: Não consegui encontrar o canal de ofertas.")
+        return
+
+    print(f"⏰ {datetime.now().strftime('%H:%M')} - Iniciando postagem automática...")
+    
+    # Reutilizamos a lógica de busca (idealmente você moveria a busca para uma função separada)
+    async with aiohttp.ClientSession() as session:
+        cotacao = await obter_cotacao_dolar(session)
+        jogos = await buscar_promocoes_premium(session, cotacao)
+
+    if jogos:
+        embed = discord.Embed(
+            title="🗞️ Jornal NemoSteam: As Melhores de Hoje",
+            description="Bom dia! Aqui estão as ofertas mais quentes que acabaram de sair do forno.",
+            color=0x1b2838
+        )
+        
+        emojis_rank = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        for i, jogo in enumerate(jogos):
+            embed.add_field(
+                name=f"{emojis_rank[i]} {jogo['titulo']}",
+                value=f"💰 **{jogo['preco_atual']}** (~~{jogo['preco_original']}~~)\n🔗 [Ver na Steam]({jogo['link']})",
+                inline=False
+            )
+        
+        await canal.send(embed=embed)
 
 bot.run(TOKEN)

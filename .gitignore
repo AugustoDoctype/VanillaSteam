@@ -1,11 +1,11 @@
-# Segredos e Configurações
+# Ignorar arquivos de configuração local e senhas
 .env
 
-# Ambiente Virtual (Dependências)
-venv/
-env/
-ENV/
+# Ignorar arquivos de log
+*.log
+vanilla.log
 
-# Arquivos temporários do Python
+# Ignorar pastas virtuais do Python (se usar)
 __pycache__/
-*.pyc
+.venv/
+venv/

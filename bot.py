@@ -16,24 +16,18 @@ ID_CANAL_OFERTAS = 123456789012345678
 HORARIO_POSTAGEM = time(hour=10, minute=0)
 
 # --- CONFIGURAÇÃO ISOLADA E PROFISSIONAL DE LOGS ---
-# Criamos um formatador elegante para as mensagens
 formatador = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-# Configura o arquivo (Salva apenas o que o Vanilla faz)
 file_handler = logging.FileHandler("vanilla.log", encoding="utf-8")
 file_handler.setFormatter(formatador)
 
-# Configura o terminal/console
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatador)
 
-# Instancia o logger do Vanilla e anexa os configuradores
 logger = logging.getLogger("Vanilla")
 logger.setLevel(logging.INFO)
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
-
-# Evita que os logs do Vanilla dupliquem no log padrão do sistema
 logger.propagate = False 
 # ---------------------------------------------------
 
@@ -275,7 +269,6 @@ async def jornal_da_manha():
 # 5. COMANDOS DO USUÁRIO (E COMPONENTES)
 # ==========================================
 
-# --- [ESTRUTURA SUPORTE]: MENU INTERATIVO ---
 class MenuOfertas(discord.ui.Select):
     def __init__(self, jogos):
         self.jogos = jogos
@@ -322,7 +315,6 @@ class PainelOfertasView(discord.ui.View):
         self.add_item(MenuOfertas(jogos))
 
 
-# --- COMANDOS ---
 @bot.command(name="ofertas")
 @commands.cooldown(1, 30, commands.BucketType.guild)
 async def ofertas(ctx):
@@ -357,14 +349,23 @@ async def ofertas(ctx):
     await ctx.send(embed=embed_lista, view=view_interativa)
 
 
+# Mapeamento focado no público Brasileiro (Lojas conhecidas e confiáveis)
+LOJAS_CHEAPSHARK = {
+    "1": "Steam",
+    "3": "Green Man Gaming", 
+    "7": "GOG",              
+    "25": "Epic Games"       
+}
+
 @bot.command(name="buscar")
 async def buscar(ctx, *, nome_jogo: str):
-    """Busca o preço atual de um jogo específico e analisa o histórico em R$."""
+    """Busca o preço de um jogo e compara nas principais lojas (Steam, Epic, GOG, etc)."""
     logger.info(f"Usuário {ctx.author} buscou pelo jogo: '{nome_jogo}'")
-    msg_espera = await ctx.send(f"🔎 Consultando os servidores e histórico para **{nome_jogo}**...")
+    msg_espera = await ctx.send(f"🔎 Consultando os servidores, histórico e lojas concorrentes para **{nome_jogo}**...")
 
     try:
         async with aiohttp.ClientSession() as session:
+            # 1. Busca básica para pegar o ID
             url_busca = f"https://www.cheapshark.com/api/1.0/games?title={nome_jogo.replace(' ', '%20')}&limit=1"
             async with session.get(url_busca) as resp:
                 dados_busca = await resp.json()
@@ -379,22 +380,37 @@ async def buscar(ctx, *, nome_jogo: str):
             preco_atual_usd = float(dados_busca[0].get('cheapest', 0))
 
             if not steam_app_id or steam_app_id == "0":
-                await msg_espera.edit(content=f"ℹ️ **{titulo_oficial}** não está disponível na Steam.")
+                await msg_espera.edit(content=f"ℹ️ **{titulo_oficial}** não está disponível na Steam/banco de dados principal.")
                 return
 
+            # 2. Busca avançada (Histórico + Outras Lojas)
             url_historico = f"https://www.cheapshark.com/api/1.0/games?id={game_id}"
             async with session.get(url_historico) as resp_hist:
                 dados_hist = await resp_hist.json()
             
             cotacao_hoje = await obter_cotacao_dolar(session)
             
+            # Cálculo de histórico
             info_historico = dados_hist.get('cheapestPriceEver', {})
             menor_preco_usd = float(info_historico.get('price', 0))
             timestamp_menor = info_historico.get('date', 0)
-            
             menor_preco_brl = menor_preco_usd * cotacao_hoje
             data_menor = datetime.fromtimestamp(timestamp_menor).strftime('%d/%m/%Y') if timestamp_menor else "Desconhecida"
 
+            # 3. Comparador de Lojas (Agrupa apenas as strings para usar depois)
+            deals = dados_hist.get('deals', [])
+            texto_outras_lojas = ""
+            
+            for deal in deals:
+                store_id = deal.get('storeID')
+                if store_id in LOJAS_CHEAPSHARK and store_id != "1":
+                    preco_usd_loja = float(deal.get('price', 0))
+                    deal_id = deal.get('dealID')
+                    link_loja = f"https://www.cheapshark.com/redirect?dealID={deal_id}"
+                    
+                    texto_outras_lojas += f"🏪 **{LOJAS_CHEAPSHARK[store_id]}**: US$ {preco_usd_loja:.2f} (Preço Americano) - [Comprar]({link_loja})\n"
+                    
+            # 4. Dados da Steam Brasil (Criação do Embed)
             url_steam = f"https://store.steampowered.com/api/appdetails?appids={steam_app_id}&cc=br&filters=price_overview"
             async with session.get(url_steam) as resp_steam:
                 dados_steam = await resp_steam.json()
@@ -404,6 +420,8 @@ async def buscar(ctx, *, nome_jogo: str):
                     return
 
                 info_preco = dados_steam[steam_app_id]['data'].get('price_overview')
+                
+                # AQUI: O Embed é criado no momento correto
                 embed = discord.Embed(title=titulo_oficial, color=0x1b2838)
                 embed.set_image(url=f"https://cdn.akamai.steamstatic.com/steam/apps/{steam_app_id}/header.jpg")
 
@@ -413,32 +431,36 @@ async def buscar(ctx, *, nome_jogo: str):
                     desc = info_preco.get('discount_percent', 0)
                     
                     if desc > 0:
-                        embed.description = f"🔥 **Promoção Ativa!**\n💰 De: ~~{p_orig}~~ por **{p_atual}**\n📉 Desconto: **{desc}%**\n"
+                        embed.description = f"🔥 **Promoção Ativa na Steam!**\n💰 De: ~~{p_orig}~~ por **{p_atual}**\n📉 Desconto: **{desc}%**\n"
                     else:
-                        embed.description = f"💰 Preço Atual: **{p_atual}**\n*Este jogo não está em oferta na Steam.*\n"
+                        embed.description = f"💰 Preço na Steam: **{p_atual}**\n*Este jogo não está em oferta na Steam no momento.*\n"
                     
                     embed.description += "\n📊 **Análise de Oportunidade:**\n"
                     
                     if preco_atual_usd <= menor_preco_usd:
-                        embed.description += f"🏆 **PREÇO HISTÓRICO ATINGIDO!** O jogo nunca esteve tão barato. O recorde histórico estimado é de **R$ {menor_preco_brl:.2f}**. Pode comprar!"
+                        embed.description += f"🏆 **PREÇO HISTÓRICO!** Recorde alcançado (Est. **R$ {menor_preco_brl:.2f}**)."
                     else:
                         diferenca = ((preco_atual_usd - menor_preco_usd) / menor_preco_usd) * 100
                         embed.description += (
                             f"📉 Menor preço histórico estimado: **R$ {menor_preco_brl:.2f}** *(em {data_menor})*.\n"
-                            f"ℹ️ O preço atual na loja está cerca de **{diferenca:.0f}% acima** do recorde histórico."
+                            f"ℹ️ O menor preço atual está **{diferenca:.0f}% acima** do recorde."
                         )
                 else:
                     embed.description = "ℹ️ Jogo gratuito ou sem preço listado na loja."
 
-                embed.add_field(name="Link na Loja", value=f"[Abrir Página da Steam](https://store.steampowered.com/app/{steam_app_id})", inline=False)
-                embed.set_footer(text="Vanilla Engine")
+                # AQUI: Inserimos as lojas alternativas que agrupamos no Passo 3
+                if texto_outras_lojas:
+                    embed.add_field(name="🌍 Lojas Alternativas (Referência Global)", value=texto_outras_lojas, inline=False)
+
+                embed.add_field(name="Link na Steam", value=f"[Abrir Página da Steam](https://store.steampowered.com/app/{steam_app_id})", inline=False)
+                embed.set_footer(text="Vanilla Engine • Valores de outras lojas estão em Dólar, pois não incluem o preço localizado BR.")
                 
                 await msg_espera.delete()
                 await ctx.send(embed=embed)
 
     except Exception as e:
         logger.error(f"Erro crítico na busca do jogo '{nome_jogo}': {e}", exc_info=True)
-        await msg_espera.edit(content="⚠️ Ocorreu um erro interno ao processar a análise histórica.")
+        await msg_espera.edit(content="⚠️ Ocorreu um erro interno ao processar a análise e as lojas.")
 
 
 @bot.command(name="hype")

@@ -109,7 +109,10 @@ async def obter_cotacao_dolar(session):
                 dados = await resp.json()
                 return float(dados["USDBRL"]["bid"])
     except Exception: 
-        return 5.50 
+        pass # Ignora qualquer erro de internet e desce para o retorno seguro
+        
+    # RETORNO DE SEGURANÇA: Se qualquer coisa der errado na API (ou status != 200), ele sempre retorna 5.50
+    return 5.50
 
 async def buscar_promocoes_premium(session):
     c_70, c_50 = [], []
@@ -177,8 +180,72 @@ async def buscar_promocoes_indies(session):
     return await processar_candidatos(session, c_70, c_50, 5)
 
 
+async def obter_aba_ofertas(session):
+    url = "https://store.steampowered.com/api/featuredcategories/?cc=br&l=brazilian"
+    jogos_filtrados = []
+    seen_ids = set()       # Bloqueia IDs duplicados
+    seen_titles = set()    # Bloqueia nomes repetidos (edições diferentes com mesmo nome)
+    
+    try:
+        async with session.get(url, timeout=10) as response:
+            if response.status != 200:
+                logger.error(f"API Oficial da Steam Storefront retornou status {response.status}")
+                return jogos_filtrados
+                
+            dados = await response.json()
+            specials = dados.get("specials", {})
+            items = specials.get("items", [])
+            
+            for item in items:
+                app_id = str(item.get("id", ""))
+                titulo = str(item.get("name", "")).strip()
+                
+                # Validação básica de dados vazios
+                if not app_id or app_id == "0" or not titulo:
+                    continue
+                    
+                # 🛡️ FILTRO ANTI-REPETIÇÃO: Se o jogo já passou por aqui, ignora
+                if app_id in seen_ids or titulo.lower() in seen_titles:
+                    continue
+                
+                is_discounted = item.get("discounted", False)
+                desc_percent = item.get("discount_percent", 0)
+                orig_raw = item.get("original_price")
+                final_raw = item.get("final_price")
+                
+                if final_raw is not None:
+                    preco_atual_fmt = f"R$ {final_raw / 100:.2f}".replace('.', ',')
+                else:
+                    preco_atual_fmt = "Gratuito" if not is_discounted else "Consultar"
+                    
+                if orig_raw is not None:
+                    preco_orig_fmt = f"R$ {orig_raw / 100:.2f}".replace('.', ',')
+                else:
+                    preco_orig_fmt = "--"
+                
+                if final_raw == 0 and not is_discounted:
+                    preco_atual_fmt = "Gratuito"
+
+                # Registra o jogo nos históricos antes de salvar na lista final
+                seen_ids.add(app_id)
+                seen_titles.add(titulo.lower())
+
+                jogos_filtrados.append({
+                    "id": app_id,
+                    "titulo": titulo,
+                    "preco_atual": preco_atual_fmt,
+                    "preco_original": preco_orig_fmt,
+                    "desconto_fmt": f"{desc_percent}%" if desc_percent > 0 else "Promo",
+                    "link": f"https://store.steampowered.com/app/{app_id}"
+                })
+                
+    except Exception as e:
+        logger.error(f"Erro crítico ao puxar ofertas direto da API Steam: {e}", exc_info=True)
+        
+    return jogos_filtrados
+
 # ==========================================
-# 3. EVENTOS E TAREFAS AUTOMÁTICAS
+# 3. EVENTOS E TAREFAS AUTOMÁTICAS (CORRIGIDO ANTI-LIMITES)
 # ==========================================
 
 @bot.event
@@ -200,8 +267,9 @@ async def jornal_da_manha():
         lista_premium = await buscar_promocoes_premium(session)
         lista_hype = await buscar_promocoes_hype(session)
         lista_indies = await buscar_promocoes_indies(session)
+        lista_vitrine = await obter_aba_ofertas(session)
 
-    if not any([lista_premium, lista_hype, lista_indies]):
+    if not any([lista_premium, lista_hype, lista_indies, lista_vitrine]):
         logger.warning("Nenhuma promoção válida encontrada para a edição atual.")
         return
 
@@ -209,7 +277,9 @@ async def jornal_da_manha():
     hora_atual = datetime.now(fuso_brasilia).hour
     tipo_edicao = "Edição Matinal" if hora_atual < 12 else "Edição do Almoço / Atualização Steam"
     
-    # --- Embed Principal (Top 10) ---
+    # ------------------------------------------
+    # EMBED 1: O Top 10 Elite (Dividido para evitar erro de 1024 caracteres)
+    # ------------------------------------------
     embed_principal = discord.Embed(
         title=f"📰 VANILLA DAILY • {tipo_edicao} ({data_hoje})",
         description="Filtramos o banco de dados global para trazer a elite dos descontos diretamente para o servidor.",
@@ -224,32 +294,104 @@ async def jornal_da_manha():
 
     linhas_top10 = []
     for i, j in enumerate(lista_premium[:10]):
-        line = f"{EMOJIS_RANK[i]} **{j['titulo']}**\n└ 📉 `{j['desconto_fmt']} OFF` | 💰 **{j['preco_atual']}** *(De: {j['preco_original']})*"
+        titulo = j.get('titulo', 'Jogo Desconhecido')
+        desc_fmt = j.get('desconto_fmt', '0%')
+        p_at = j.get('preco_atual', 'N/A')
+        p_or = j.get('preco_original', 'N/A')
+        link = j.get('link', 'https://store.steampowered.com')
+        
+        line = f"{EMOJIS_RANK[i]} **[{titulo}]({link})**\n└ 📉 `{desc_fmt} OFF` | 💰 **{p_at}** *(De: {p_or})*"
         linhas_top10.append(line)
 
-    embed_principal.add_field(
-        name="🏆 HIGHLIGHTS: TOP 10 DE HOJE", 
-        value="\n".join(linhas_top10) if linhas_top10 else "Nenhum grande destaque processado.", 
-        inline=False
-    )
+    # 🛡️ Correção do Limite: Divisão cirúrgica em blocos de no máximo 5 jogos
+    if linhas_top10:
+        metade_1 = linhas_top10[:5]
+        metade_2 = linhas_top10[5:]
+
+        embed_principal.add_field(
+            name="🏆 HIGHLIGHTS: TOP 1 ao 5", 
+            value="\n".join(metade_1), 
+            inline=False
+        )
+        if metade_2:
+            embed_principal.add_field(
+                name="🏅 HIGHLIGHTS: TOP 6 ao 10", 
+                value="\n".join(metade_2), 
+                inline=False
+            )
+    else:
+        embed_principal.add_field(
+            name="🏆 HIGHLIGHTS: TOP 10 DE HOJE",
+            value="Nenhum grande destaque processado.",
+            inline=False
+        )
+        
     await canal.send(embed=embed_principal)
 
-    # --- Embed Suplementar (Hype & Indies) ---
+    # ------------------------------------------
+    # EMBED 2: Vitrine de Ofertas (Aba Oficial Steam)
+    # ------------------------------------------
+    if lista_vitrine:
+        embed_vitrine = discord.Embed(
+            title="🎮 VITRINE DE OFERTAS DA STEAM",
+            description="Destaques oficiais extraídos diretamente da aba de ofertas da loja (Sincronização Direta):",
+            color=0x1b2838
+        )
+        
+        try:
+            primeiro_app_id = lista_vitrine[0]['id']
+            embed_vitrine.set_thumbnail(url=f"https://cdn.akamai.steamstatic.com/steam/apps/{primeiro_app_id}/header.jpg")
+        except Exception: pass
+        
+        linhas_vitrine = []
+        # Mantido em 5 para segurança total de tamanho de dados
+        for j in lista_vitrine[:5]:
+            titulo = j.get('titulo', 'Jogo em Destaque')
+            desc_fmt = j.get('desconto_fmt', 'Promo')
+            p_at = j.get('preco_atual', 'Consultar')
+            p_or = j.get('preco_original', '--')
+            link = j.get('link', 'https://store.steampowered.com')
+
+            line = f"🔹 **{titulo}**\n└ 📉 `{desc_fmt} OFF` | 💰 **{p_at}** *(De: {p_or})* • [🛒 Comprar]({link})"
+            linhas_vitrine.append(line)
+            
+        embed_vitrine.add_field(
+            name="🔥 Em Destaque na Página Principal",
+            value="\n\n".join(linhas_vitrine),
+            inline=False
+        )
+        await canal.send(embed=embed_vitrine)
+
+    # ------------------------------------------
+    # EMBED 3: Suplemento Especial (Hype & Indies)
+    # ------------------------------------------
     if lista_hype or lista_indies:
         embed_suplemento = discord.Embed(title="🎯 SUPLEMENTO ESPECIAL", color=COR_SUCESSO)
         
         if lista_hype:
-            texto_hype = "".join([f"🔥 **{j['titulo']}**\n└ `{j['desconto_fmt']} OFF` | **{j['preco_atual']}**\n" for j in lista_hype[:3]])
+            texto_hype = ""
+            for j in lista_hype[:3]:
+                t = j.get('titulo', 'AAA')
+                l = j.get('link', 'https://store.steampowered.com')
+                d = j.get('desconto_fmt', '-%')
+                p = j.get('preco_atual', 'N/A')
+                texto_hype += f"🔥 **[{t}]({l})**\n└ `{d} OFF` | **{p}**\n"
             embed_suplemento.add_field(name="🚀 Blockbusters de Peso", value=texto_hype, inline=False)
 
         if lista_indies:
-            texto_indies = "".join([f"💎 **{j['titulo']}** (Nota: `{j['nota']}`)\n└ `🏷️ {j['preco_atual']}`\n" for j in lista_indies[:3]])
+            texto_indies = ""
+            for j in lista_indies[:3]:
+                t = j.get('titulo', 'Indie')
+                l = j.get('link', 'https://store.steampowered.com')
+                n = j.get('nota', '90%')
+                p = j.get('preco_atual', 'N/A')
+                texto_indies += f"💎 **[{t}]({l})** (Nota: `{n}`)\n└ `🏷️ {p}`\n"
             embed_suplemento.add_field(name="💎 Joias Escondidas (Indies)", value=texto_indies, inline=False)
 
         embed_suplemento.set_footer(text="Vanilla Engine • Relatório Diário Automatizado")
         await canal.send(embed=embed_suplemento)
     
-    logger.info(f"Sucesso: {tipo_edicao} publicada.")
+    logger.info(f"Sucesso: {tipo_edicao} publicada com tratamento de tamanho de strings.")
 
 
 # ==========================================

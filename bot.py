@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from datetime import time, datetime, timezone, timedelta
+import asyncio
 
 # ==========================================
 # 1. CONFIGURAÇÕES INICIAIS E DESIGN
@@ -77,6 +78,9 @@ async def validar_jogo_steam(session, app_id, jogo_cheapshark, adicionados):
                             'nota': f"{int(jogo_cheapshark.get('steamRatingPercent', 0))}%",
                             'link': f"https://store.steampowered.com/app/{app_id}"
                         }
+            elif resp.status == 429:
+                # Agora o terminal vai te avisar em amarelo se a Steam te bloquear!
+                logger.warning(f"⚠️ RATE LIMIT DA STEAM! IP bloqueado temporariamente (AppID {app_id}).")
     except Exception as e:
         logger.debug(f"Erro ao validar AppID {app_id} na Steam: {e}")
     return None
@@ -90,6 +94,7 @@ async def processar_candidatos(session, cand_70, cand_50, limite):
         if len(jogos_validados) >= limite: break
         res = await validar_jogo_steam(session, j['steamAppID'], j, adicionados)
         if res: jogos_validados.append(res)
+        await asyncio.sleep(0.8) # 🛑 Freio de Segurança Anti-Spam
         
     # Fase 2: Preenchimento de Lacunas (>= 50%)
     if len(jogos_validados) < limite:
@@ -97,6 +102,7 @@ async def processar_candidatos(session, cand_70, cand_50, limite):
             if len(jogos_validados) >= limite: break
             res = await validar_jogo_steam(session, j['steamAppID'], j, adicionados)
             if res: jogos_validados.append(res)
+            await asyncio.sleep(0.8) # 🛑 Freio de Segurança Anti-Spam
             
     jogos_validados.sort(key=lambda x: x['desconto_raw'], reverse=True)
     return jogos_validados
@@ -120,10 +126,12 @@ async def buscar_promocoes_premium(session):
     limite_paginas = 5 
     
     while (len(c_70) + len(c_50)) < 40 and pagina < limite_paginas:
-        url = f"https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal Rating&onSale=1&pageSize=60&pageNumber={pagina}"
+        url = f"https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal%20Rating&onSale=1&pageSize=60&pageNumber={pagina}"
         try:
             async with session.get(url, timeout=10) as resp:
-                if resp.status != 200: break
+                if resp.status != 200:
+                    logger.warning(f"⚠️ CheapShark bloqueou a busca Premium! Status HTTP: {resp.status}") 
+                    break
                 dados = await resp.json()
                 if not dados: break
         except Exception as e:
@@ -159,7 +167,7 @@ async def buscar_promocoes_hype(session):
     return await processar_candidatos(session, c_70, c_50, 5)
 
 async def buscar_promocoes_indies(session):
-    url = "https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal Rating&onSale=1&pageSize=150"
+    url = "https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy=Deal%20Rating&onSale=1&pageSize=150"
     try:
         async with session.get(url, timeout=10) as resp:
             if resp.status != 200: return []
@@ -263,7 +271,14 @@ async def jornal_da_manha():
         return
 
     logger.info("Iniciando varredura automatizada para a edição do Jornal...")
-    async with aiohttp.ClientSession() as session:
+    
+    # 🎭 MÁSCARA PARA PASSAR PELO FIREWALL DA CHEAPSHARK
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # Aplicando a máscara na sessão
+    async with aiohttp.ClientSession(headers=headers) as session:
         lista_premium = await buscar_promocoes_premium(session)
         lista_hype = await buscar_promocoes_hype(session)
         lista_indies = await buscar_promocoes_indies(session)
